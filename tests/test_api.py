@@ -223,3 +223,56 @@ def test_batch_delete():
     # Check Disk
     assert not os.path.exists("data/file0.txt")
     assert os.path.exists("data/file2.txt")
+
+def test_integration_workflow():
+    # 1. Create Mock Integration
+    config = "{}"
+    res = client.post("/integrations", json={"provider": "mock", "name": "Test Cloud", "config": config})
+    assert res.status_code == 200
+    account_id = res.json()["id"]
+
+    # 2. Sync
+    res = client.post(f"/integrations/{account_id}/sync")
+    assert res.status_code == 200
+    assert res.json()["synced_files"] > 0
+
+    # 3. Verify files in DB
+    files = client.get("/files").json()
+    cloud_files = [f for f in files if f["source"] == "mock"]
+    assert len(cloud_files) > 0
+    filenames = [f["filename"] for f in cloud_files]
+    assert "mock_report.pdf" in filenames
+
+    # 4. Delete Integration
+    res = client.delete(f"/integrations/{account_id}")
+    assert res.status_code == 200
+
+    # 5. Verify files removed
+    files = client.get("/files").json()
+    cloud_files = [f for f in files if f["source"] == "mock"]
+    assert len(cloud_files) == 0
+
+def test_cloud_download_and_duplicates():
+    # 1. Create TWO Mock Integrations
+    config = "{}"
+    res1 = client.post("/integrations", json={"provider": "mock", "name": "Cloud A", "config": config})
+    id1 = res1.json()["id"]
+    res2 = client.post("/integrations", json={"provider": "mock", "name": "Cloud B", "config": config})
+    id2 = res2.json()["id"]
+
+    # 2. Sync both (they have same file paths)
+    client.post(f"/integrations/{id1}/sync")
+    client.post(f"/integrations/{id2}/sync")
+
+    # 3. Verify duplicates exist (same filename, different accounts)
+    files = client.get("/files").json()
+    mock_reports = [f for f in files if f["filename"] == "mock_report.pdf"]
+    assert len(mock_reports) >= 2
+
+    # 4. Test Download
+    file_id = mock_reports[0]["id"]
+    res = client.get(f"/download/{file_id}")
+    if res.status_code != 200:
+        print(res.json())
+    assert res.status_code == 200
+    assert b"%PDF" in res.content # Check for mock content

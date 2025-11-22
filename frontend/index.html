@@ -47,6 +47,8 @@
 
         .tag { background: #eee; padding: 2px 6px; border-radius: 10px; font-size: 0.8em; margin-right: 4px; display: inline-block; }
         .tag-add { cursor: pointer; color: #3498db; font-weight: bold; }
+        .cat-local { color: #2c3e50; }
+        .cat-cloud { color: #3498db; }
     </style>
 </head>
 <body>
@@ -57,8 +59,35 @@
             <div id="preview-container" class="preview-content"></div>
         </div>
     </div>
+
+    <div id="integrations-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeIntegrations()">&times;</span>
+            <h2>Manage Integrations</h2>
+            <div style="margin-bottom: 20px; padding: 15px; background: #f9f9f9; border-radius: 4px;">
+                <h3>Add Account</h3>
+                <select id="int-provider" onchange="toggleIntFields()">
+                    <option value="mock">Simulated Cloud</option>
+                    <option value="nextcloud">Nextcloud / OwnCloud</option>
+                    <option value="google">Google Drive (Simulated)</option>
+                </select>
+                <input type="text" id="int-name" placeholder="Account Name (e.g. My Drive)" style="margin: 5px; padding: 5px;">
+                <div id="int-fields-webdav" style="display:none;">
+                    <input type="text" id="int-url" placeholder="WebDAV URL" style="margin: 5px; padding: 5px; width: 60%;">
+                    <input type="text" id="int-user" placeholder="Username" style="margin: 5px; padding: 5px;">
+                    <input type="password" id="int-pass" placeholder="Password" style="margin: 5px; padding: 5px;">
+                </div>
+                <button onclick="addIntegration()" style="padding: 5px 15px; background: #2ecc71; color: white; border: none; cursor: pointer;">Connect</button>
+            </div>
+
+            <h3>Connected Accounts</h3>
+            <ul id="integrations-list" style="list-style: none; padding: 0;"></ul>
+        </div>
+    </div>
+
     <header>
         <h1>DataVault Dashboard</h1>
+        <button onclick="openIntegrations()" style="position: absolute; right: 20px; top: 20px; background: none; border: 1px solid white; color: white; padding: 5px 10px; cursor: pointer;">Cloud Integrations</button>
     </header>
     <div class="container">
         <div class="dashboard-grid">
@@ -111,6 +140,7 @@
                         <th><input type="checkbox" id="select-all" onclick="toggleSelectAll()"></th>
                         <th>Filename</th>
                         <th>Category</th>
+                        <th>Source</th>
                         <th>Tags</th>
                         <th>Size (KB)</th>
                         <th>Date</th>
@@ -229,10 +259,13 @@
                 let tagsHtml = file.tags ? file.tags.split(',').map(t => `<span class="tag">${t.trim()}</span>`).join('') : '';
                 tagsHtml += ` <span class="tag-add" onclick="editTags(${file.id}, '${file.tags || ''}')">+</span>`;
 
+                let sourceHtml = file.source === 'local' ? '💻 Local' : `☁️ ${file.source}`;
+
                 tr.innerHTML = `
                     <td><input type="checkbox" class="file-select" value="${file.id}" onclick="updateBulkButton()"></td>
                     <td>${file.filename}</td>
                     <td><span class="category-tag cat-${file.category}">${file.category}</span></td>
+                    <td>${sourceHtml}</td>
                     <td>${tagsHtml}</td>
                     <td>${sizeKB}</td>
                     <td>${date}</td>
@@ -246,6 +279,95 @@
                 tbody.appendChild(tr);
             });
             updateBulkButton();
+        }
+
+        function openIntegrations() {
+            document.getElementById('integrations-modal').style.display = 'block';
+            loadIntegrations();
+        }
+
+        function closeIntegrations() {
+            document.getElementById('integrations-modal').style.display = 'none';
+        }
+
+        function toggleIntFields() {
+            const provider = document.getElementById('int-provider').value;
+            document.getElementById('int-fields-webdav').style.display = (provider === 'nextcloud') ? 'block' : 'none';
+        }
+
+        async function addIntegration() {
+            const provider = document.getElementById('int-provider').value;
+            const name = document.getElementById('int-name').value;
+            let config = {};
+
+            if (provider === 'nextcloud') {
+                config = {
+                    url: document.getElementById('int-url').value,
+                    username: document.getElementById('int-user').value,
+                    password: document.getElementById('int-pass').value
+                };
+            }
+
+            if (!name) return alert("Name is required");
+
+            try {
+                const res = await fetch('/integrations', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ provider, name, config: JSON.stringify(config) })
+                });
+                if (res.ok) {
+                    loadIntegrations();
+                    alert("Account added!");
+                } else {
+                    alert("Failed to add account");
+                }
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        async function loadIntegrations() {
+            const res = await fetch('/integrations');
+            const accounts = await res.json();
+            const list = document.getElementById('integrations-list');
+            list.innerHTML = '';
+
+            accounts.forEach(acc => {
+                const li = document.createElement('li');
+                li.style.padding = "10px";
+                li.style.borderBottom = "1px solid #eee";
+                li.style.display = "flex";
+                li.style.justifyContent = "space-between";
+                li.innerHTML = `
+                    <span><b>${acc.name}</b> (${acc.provider})</span>
+                    <div>
+                        <button onclick="syncIntegration(${acc.id})" style="cursor:pointer; color:blue;">Sync</button>
+                        <button onclick="deleteIntegration(${acc.id})" style="cursor:pointer; color:red; margin-left:10px;">Remove</button>
+                    </div>
+                `;
+                list.appendChild(li);
+            });
+        }
+
+        async function syncIntegration(id) {
+            try {
+                const res = await fetch(`/integrations/${id}/sync`, { method: 'POST' });
+                const data = await res.json();
+                alert(`Synced ${data.synced_files} new files.`);
+                loadFiles();
+                loadStats();
+            } catch (err) {
+                alert("Sync failed");
+            }
+        }
+
+        async function deleteIntegration(id) {
+            if (!confirm("Remove account and all its synced files?")) return;
+            await fetch(`/integrations/${id}`, { method: 'DELETE' });
+            loadIntegrations();
+            loadFiles();
+            loadStats();
         }
 
         function toggleSelectAll() {

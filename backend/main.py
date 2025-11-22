@@ -1,13 +1,15 @@
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from typing import List
 import shutil
 import os
 from . import models, database
 from .classifier import Classifier
+from .providers.manager import ProviderManager
 from pydantic import BaseModel
+import json
 
 # Ensure data directory exists before DB creation (if using file-based SQLite inside it)
 os.makedirs("data", exist_ok=True)
@@ -66,7 +68,8 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         filepath=file_location,
         category=category,
         content_type=file.content_type,
-        size=file_size
+        size=file_size,
+        source="local"
     )
     db.add(db_file)
     db.commit()
@@ -97,11 +100,33 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
     db_file = db.query(models.FileMetadata).filter(models.FileMetadata.id == file_id).first()
     if not db_file:
         raise HTTPException(status_code=404, detail="File not found")
-    if not os.path.exists(db_file.filepath):
-        raise HTTPException(status_code=404, detail="File on disk not found")
 
     media_type = db_file.content_type or 'application/octet-stream'
-    return FileResponse(path=db_file.filepath, filename=db_file.filename, media_type=media_type)
+
+    # If local file
+    if db_file.source == 'local':
+        if not os.path.exists(db_file.filepath):
+            raise HTTPException(status_code=404, detail="File on disk not found")
+        return FileResponse(path=db_file.filepath, filename=db_file.filename, media_type=media_type)
+
+    # If cloud file
+    else:
+        account = db.query(models.CloudAccount).filter(models.CloudAccount.id == db_file.cloud_account_id).first()
+        if not account:
+            raise HTTPException(status_code=404, detail="Cloud account not found")
+
+        try:
+            provider = ProviderManager.get_provider(account.provider, account.config)
+            stream = provider.download_file(db_file.filepath) # filepath stores external_id
+
+            # Use StreamingResponse for cloud files
+            return StreamingResponse(
+                stream,
+                media_type=media_type,
+                headers={"Content-Disposition": f"attachment; filename={db_file.filename}"}
+            )
+        except Exception as e:
+             raise HTTPException(status_code=500, detail=f"Cloud download error: {str(e)}")
 
 class TagUpdate(BaseModel):
     tags: str
@@ -226,5 +251,87 @@ def get_files(category: str = None, search: str = None, tag: str = None, sort_by
         "size": f.size,
         "upload_date": f.upload_date,
         "tags": f.tags,
-        "content_type": f.content_type
+        "content_type": f.content_type,
+        "source": f.source
     } for f in files]
+
+# Integration Endpoints
+
+class CloudAccountCreate(BaseModel):
+    provider: str
+    name: str
+    config: str # JSON
+
+@app.post("/integrations")
+def create_integration(account: CloudAccountCreate, db: Session = Depends(get_db)):
+    # Validate JSON config
+    try:
+        json.loads(account.config)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid JSON config")
+
+    db_account = models.CloudAccount(
+        provider=account.provider,
+        name=account.name,
+        config=account.config
+    )
+    db.add(db_account)
+    db.commit()
+    db.refresh(db_account)
+    return db_account
+
+@app.get("/integrations")
+def list_integrations(db: Session = Depends(get_db)):
+    return db.query(models.CloudAccount).all()
+
+@app.delete("/integrations/{account_id}")
+def delete_integration(account_id: int, db: Session = Depends(get_db)):
+    account = db.query(models.CloudAccount).filter(models.CloudAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    # Delete associated files
+    db.query(models.FileMetadata).filter(models.FileMetadata.cloud_account_id == account_id).delete()
+
+    db.delete(account)
+    db.commit()
+    return {"detail": "Integration deleted"}
+
+@app.post("/integrations/{account_id}/sync")
+def sync_integration(account_id: int, db: Session = Depends(get_db)):
+    account = db.query(models.CloudAccount).filter(models.CloudAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    try:
+        provider = ProviderManager.get_provider(account.provider, account.config)
+        files = provider.list_files()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Provider error: {str(e)}")
+
+    # Sync files: Add new ones.
+    # For simplicity, we won't handle updates/deletions of existing remote files in this step, just append new ones.
+    count = 0
+    for f in files:
+        # Check if exists by filepath/external_id
+        existing = db.query(models.FileMetadata).filter(
+            models.FileMetadata.filepath == f['external_id'],
+            models.FileMetadata.cloud_account_id == account_id
+        ).first()
+
+        if not existing:
+            category = classifier.classify(f['filename'], f.get('content_type'))
+            new_file = models.FileMetadata(
+                filename=f['filename'],
+                filepath=f['external_id'], # Use external ID as filepath for cloud files
+                category=category,
+                content_type=f.get('content_type'),
+                size=f['size'],
+                source=account.provider,
+                cloud_account_id=account.id
+            )
+            db.add(new_file)
+            count += 1
+
+    db.commit()
+    return {"synced_files": count}

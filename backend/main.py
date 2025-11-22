@@ -8,6 +8,9 @@ import os
 from . import models, database
 from .classifier import Classifier
 
+# Ensure data directory exists before DB creation (if using file-based SQLite inside it)
+os.makedirs("data", exist_ok=True)
+
 models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI()
@@ -35,11 +38,12 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
     # Ensure data directory exists
     os.makedirs("data", exist_ok=True)
 
-    file_location = f"data/{file.filename}"
+    # Sanitize filename
+    filename = os.path.basename(file.filename)
+    file_location = f"data/{filename}"
 
-    # Handle duplicate filenames by appending a counter or timestamp
-    # For simplicity, we'll just overwrite or error? Let's handle it gracefully.
-    base, ext = os.path.splitext(file.filename)
+    # Handle duplicate filenames by appending a counter
+    base, ext = os.path.splitext(filename)
     counter = 1
     while os.path.exists(file_location):
         file_location = f"data/{base}_{counter}{ext}"
@@ -86,11 +90,52 @@ def get_stats(db: Session = Depends(get_db)):
         "total_size": total_size
     }
 
+@app.get("/download/{file_id}")
+def download_file(file_id: int, db: Session = Depends(get_db)):
+    db_file = db.query(models.FileMetadata).filter(models.FileMetadata.id == file_id).first()
+    if not db_file:
+        raise HTTPException(status_code=404, detail="File not found")
+    if not os.path.exists(db_file.filepath):
+        raise HTTPException(status_code=404, detail="File on disk not found")
+
+    return FileResponse(path=db_file.filepath, filename=db_file.filename, media_type='application/octet-stream')
+
+@app.delete("/files/{file_id}")
+def delete_file(file_id: int, db: Session = Depends(get_db)):
+    db_file = db.query(models.FileMetadata).filter(models.FileMetadata.id == file_id).first()
+    if not db_file:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Remove from disk
+    if os.path.exists(db_file.filepath):
+        os.remove(db_file.filepath)
+
+    # Remove from DB
+    db.delete(db_file)
+    db.commit()
+
+    return {"detail": "File deleted successfully"}
+
 @app.get("/files")
-def get_files(category: str = None, db: Session = Depends(get_db)):
+def get_files(category: str = None, search: str = None, sort_by: str = 'date', order: str = 'desc', db: Session = Depends(get_db)):
     query = db.query(models.FileMetadata)
+
     if category:
         query = query.filter(models.FileMetadata.category == category)
+
+    if search:
+        query = query.filter(models.FileMetadata.filename.contains(search))
+
+    if sort_by == 'size':
+        if order == 'asc':
+            query = query.order_by(models.FileMetadata.size.asc())
+        else:
+            query = query.order_by(models.FileMetadata.size.desc())
+    else: # date
+        if order == 'asc':
+            query = query.order_by(models.FileMetadata.upload_date.asc())
+        else:
+            query = query.order_by(models.FileMetadata.upload_date.desc())
 
     files = query.all()
     return [{"id": f.id, "filename": f.filename, "category": f.category, "size": f.size, "upload_date": f.upload_date} for f in files]

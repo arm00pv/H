@@ -23,6 +23,11 @@
         .cat-Image { background-color: #9b59b6; }
         .cat-Video { background-color: #e74c3c; }
         .cat-Other { background-color: #95a5a6; }
+        .action-btn { margin-right: 5px; padding: 4px 8px; border: none; border-radius: 4px; cursor: pointer; color: white; }
+        .btn-download { background-color: #3498db; }
+        .btn-delete { background-color: #e74c3c; }
+        .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+        .search-input { padding: 6px; border: 1px solid #ccc; border-radius: 4px; flex-grow: 1; }
     </style>
 </head>
 <body>
@@ -47,13 +52,24 @@
 
         <div class="card">
             <h2>File Library</h2>
+            <div class="controls">
+                <input type="text" id="search-input" class="search-input" placeholder="Search files..." oninput="debounceLoadFiles()">
+                <select id="sort-select" onchange="loadFiles()">
+                    <option value="date">Sort by Date</option>
+                    <option value="size">Sort by Size</option>
+                </select>
+                <select id="order-select" onchange="loadFiles()">
+                    <option value="desc">Descending</option>
+                    <option value="asc">Ascending</option>
+                </select>
+            </div>
             <div style="margin-bottom: 10px;">
-                <button onclick="loadFiles()">All</button>
-                <button onclick="loadFiles('Document')">Documents</button>
-                <button onclick="loadFiles('Table')">Tables</button>
-                <button onclick="loadFiles('Code')">Code</button>
-                <button onclick="loadFiles('Image')">Images</button>
-                <button onclick="loadFiles('Video')">Videos</button>
+                <button onclick="filterCategory('')">All</button>
+                <button onclick="filterCategory('Document')">Documents</button>
+                <button onclick="filterCategory('Table')">Tables</button>
+                <button onclick="filterCategory('Code')">Code</button>
+                <button onclick="filterCategory('Image')">Images</button>
+                <button onclick="filterCategory('Video')">Videos</button>
             </div>
             <table id="files-table">
                 <thead>
@@ -62,6 +78,7 @@
                         <th>Category</th>
                         <th>Size (KB)</th>
                         <th>Date</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody></tbody>
@@ -74,6 +91,8 @@
         const fileInput = document.getElementById('file-input');
         const statusDiv = document.getElementById('upload-status');
         let statsChart = null;
+        let currentCategory = '';
+        let debounceTimer;
 
         // Drag & Drop handlers
         dropZone.addEventListener('click', () => fileInput.click());
@@ -128,11 +147,30 @@
             });
         }
 
-        async function loadFiles(category = '') {
-            let url = '/files';
-            if (category) url += `?category=${category}`;
+        function filterCategory(category) {
+            currentCategory = category;
+            loadFiles();
+        }
 
-            const res = await fetch(url);
+        function debounceLoadFiles() {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(loadFiles, 300);
+        }
+
+        async function loadFiles() {
+            const search = document.getElementById('search-input').value;
+            const sortBy = document.getElementById('sort-select').value;
+            const order = document.getElementById('order-select').value;
+
+            const params = new URLSearchParams({
+                sort_by: sortBy,
+                order: order
+            });
+
+            if (currentCategory) params.append('category', currentCategory);
+            if (search) params.append('search', search);
+
+            const res = await fetch(`/files?${params.toString()}`);
             const files = await res.json();
 
             const tbody = document.querySelector('#files-table tbody');
@@ -147,9 +185,34 @@
                     <td><span class="category-tag cat-${file.category}">${file.category}</span></td>
                     <td>${sizeKB}</td>
                     <td>${date}</td>
+                    <td>
+                        <button class="action-btn btn-download" onclick="downloadFile(${file.id})">⬇</button>
+                        <button class="action-btn btn-delete" onclick="deleteFile(${file.id})">🗑</button>
+                    </td>
                 `;
                 tbody.appendChild(tr);
             });
+        }
+
+        async function downloadFile(id) {
+            window.location.href = `/download/${id}`;
+        }
+
+        async function deleteFile(id) {
+            if (!confirm('Are you sure you want to delete this file?')) return;
+
+            try {
+                const res = await fetch(`/files/${id}`, { method: 'DELETE' });
+                if (res.ok) {
+                    loadStats();
+                    loadFiles();
+                } else {
+                    alert('Failed to delete file');
+                }
+            } catch (err) {
+                console.error(err);
+                alert('Error deleting file');
+            }
         }
 
         // Initial load

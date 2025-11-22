@@ -30,6 +30,7 @@
         .btn-delete { background-color: #e74c3c; }
         .btn-preview { background-color: #9b59b6; }
         .btn-rename { background-color: #f1c40f; color: black; }
+        .btn-share { background-color: #1abc9c; }
         .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
         .search-input { padding: 6px; border: 1px solid #ccc; border-radius: 4px; flex-grow: 1; }
 
@@ -60,6 +61,16 @@
         </div>
     </div>
 
+    <div id="share-modal" class="modal">
+        <div class="modal-content" style="width: 400px;">
+            <span class="close" onclick="closeShare()">&times;</span>
+            <h2>Share File</h2>
+            <input type="email" id="share-email" placeholder="Recipient Email" style="width: 100%; padding: 8px; margin: 10px 0;">
+            <input type="hidden" id="share-file-id">
+            <button onclick="submitShare()" style="padding: 8px 15px; background: #3498db; color: white; border: none; cursor: pointer;">Send Link</button>
+        </div>
+    </div>
+
     <div id="integrations-modal" class="modal">
         <div class="modal-content">
             <span class="close" onclick="closeIntegrations()">&times;</span>
@@ -87,7 +98,10 @@
 
     <header>
         <h1>DataVault Dashboard</h1>
-        <button onclick="openIntegrations()" style="position: absolute; right: 20px; top: 20px; background: none; border: 1px solid white; color: white; padding: 5px 10px; cursor: pointer;">Cloud Integrations</button>
+        <div style="position: absolute; right: 20px; top: 20px;">
+            <button onclick="openIntegrations()" style="background: none; border: 1px solid white; color: white; padding: 5px 10px; cursor: pointer; margin-right: 10px;">Cloud Integrations</button>
+            <button onclick="logout()" style="background: #e74c3c; border: none; color: white; padding: 5px 10px; cursor: pointer; border-radius: 4px;">Logout</button>
+        </div>
     </header>
     <div class="container">
         <div class="dashboard-grid">
@@ -159,6 +173,37 @@
         let statsChart = null;
         let currentCategory = '';
         let debounceTimer;
+
+        // Auth Logic
+        async function logout() {
+            localStorage.removeItem('token');
+            window.location.href = '/static/login.html';
+        }
+
+        function checkAuth() {
+            const token = localStorage.getItem('token');
+            if (!token) {
+                window.location.href = '/static/login.html';
+                return false;
+            }
+            return true;
+        }
+
+        // Intercept fetch to add auth header
+        const originalFetch = window.fetch;
+        window.fetch = function(url, options = {}) {
+            const token = localStorage.getItem('token');
+            if (token && !url.startsWith('/auth')) {
+                options.headers = options.headers || {};
+                options.headers['Authorization'] = `Bearer ${token}`;
+            }
+            return originalFetch(url, options).then(res => {
+                if (res.status === 401) {
+                    logout();
+                }
+                return res;
+            });
+        };
 
         // Drag & Drop handlers
         dropZone.addEventListener('click', () => fileInput.click());
@@ -271,6 +316,7 @@
                     <td>${date}</td>
                     <td>
                         <button class="action-btn btn-preview" onclick="previewFile(${file.id}, '${file.category}', '${file.filename}')">👁</button>
+                        <button class="action-btn btn-share" onclick="shareFile(${file.id})">📧</button>
                         <button class="action-btn btn-download" onclick="downloadFile(${file.id})">⬇</button>
                         <button class="action-btn btn-rename" onclick="renameFile(${file.id}, '${file.filename}')">✏️</button>
                         <button class="action-btn btn-delete" onclick="deleteFile(${file.id})">🗑</button>
@@ -471,11 +517,44 @@
             document.getElementById('preview-container').innerHTML = "";
         }
 
+        // Share Logic
+        function shareFile(id) {
+            document.getElementById('share-file-id').value = id;
+            document.getElementById('share-modal').style.display = 'block';
+        }
+
+        function closeShare() {
+            document.getElementById('share-modal').style.display = 'none';
+        }
+
+        async function submitShare() {
+            const id = document.getElementById('share-file-id').value;
+            const email = document.getElementById('share-email').value;
+
+            if (!email) return alert("Email is required");
+
+            try {
+                const res = await fetch(`/files/${id}/share`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email })
+                });
+                if (res.ok) {
+                    alert("Share link sent!");
+                    closeShare();
+                } else {
+                    alert("Failed to send share email");
+                }
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
         // Close modal when clicking outside
         window.onclick = function(event) {
-            if (event.target == document.getElementById('preview-modal')) {
-                closeModal();
-            }
+            if (event.target == document.getElementById('preview-modal')) closeModal();
+            if (event.target == document.getElementById('integrations-modal')) closeIntegrations();
+            if (event.target == document.getElementById('share-modal')) closeShare();
         }
 
         async function previewFile(id, category, filename) {
@@ -514,8 +593,10 @@
         }
 
         // Initial load
-        loadStats();
-        loadFiles();
+        if (checkAuth()) {
+            loadStats();
+            loadFiles();
+        }
     </script>
 </body>
 </html>

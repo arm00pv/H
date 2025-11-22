@@ -1,7 +1,16 @@
-from sqlalchemy import Column, Integer, String, DateTime, BigInteger, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, BigInteger, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
 from .database import Base
 from datetime import datetime, timezone
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+    is_active = Column(Boolean, default=True)
+    is_verified = Column(Boolean, default=False)
 
 class CloudAccount(Base):
     __tablename__ = "cloud_accounts"
@@ -10,6 +19,7 @@ class CloudAccount(Base):
     provider = Column(String, index=True) # e.g., 'google', 'dropbox', 'nextcloud'
     name = Column(String) # User friendly name
     config = Column(String) # JSON string of credentials/config
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
 class FileMetadata(Base):
     __tablename__ = "files"
@@ -25,3 +35,4 @@ class FileMetadata(Base):
 
     source = Column(String, default="local") # 'local', 'nextcloud', etc.
     cloud_account_id = Column(Integer, ForeignKey("cloud_accounts.id"), nullable=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)

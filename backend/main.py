@@ -8,7 +8,10 @@ import os
 from . import models, database
 from .classifier import Classifier
 from .providers.manager import ProviderManager
-from pydantic import BaseModel
+from .routers import auth
+from . import auth as auth_service
+from . import email
+from pydantic import BaseModel, EmailStr
 import json
 
 # Ensure data directory exists before DB creation (if using file-based SQLite inside it)
@@ -17,7 +20,9 @@ os.makedirs("data", exist_ok=True)
 models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI()
+app.include_router(auth.router)
 classifier = Classifier()
+email_service = email.EmailService()
 
 # Mount the data directory so we can serve files if needed (optional, careful with security)
 # app.mount("/files", StaticFiles(directory="data"), name="files")
@@ -25,19 +30,12 @@ classifier = Classifier()
 # Mount frontend
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
-def get_db():
-    db = database.SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 @app.get("/")
 def read_root():
     return FileResponse('frontend/index.html')
 
 @app.post("/upload/")
-async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_file(file: UploadFile = File(...), db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
     # Ensure data directory exists
     os.makedirs("data", exist_ok=True)
 
@@ -69,7 +67,8 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         category=category,
         content_type=file.content_type,
         size=file_size,
-        source="local"
+        source="local",
+        owner_id=current_user.id
     )
     db.add(db_file)
     db.commit()
@@ -78,8 +77,10 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
     return {"info": f"file '{file.filename}' saved at '{file_location}'", "category": category, "id": db_file.id}
 
 @app.get("/stats")
-def get_stats(db: Session = Depends(get_db)):
-    files = db.query(models.FileMetadata).all()
+def get_stats(db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    files = db.query(models.FileMetadata).filter(
+        (models.FileMetadata.owner_id == current_user.id) | (models.FileMetadata.owner_id == None)
+    ).all()
 
     category_counts = {}
     total_size = 0
@@ -96,8 +97,11 @@ def get_stats(db: Session = Depends(get_db)):
     }
 
 @app.get("/download/{file_id}")
-def download_file(file_id: int, db: Session = Depends(get_db)):
-    db_file = db.query(models.FileMetadata).filter(models.FileMetadata.id == file_id).first()
+def download_file(file_id: int, db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    db_file = db.query(models.FileMetadata).filter(
+        models.FileMetadata.id == file_id,
+        (models.FileMetadata.owner_id == current_user.id) | (models.FileMetadata.owner_id == None)
+    ).first()
     if not db_file:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -132,8 +136,11 @@ class TagUpdate(BaseModel):
     tags: str
 
 @app.patch("/files/{file_id}")
-def update_file_tags(file_id: int, tag_update: TagUpdate, db: Session = Depends(get_db)):
-    db_file = db.query(models.FileMetadata).filter(models.FileMetadata.id == file_id).first()
+def update_file_tags(file_id: int, tag_update: TagUpdate, db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    db_file = db.query(models.FileMetadata).filter(
+        models.FileMetadata.id == file_id,
+        models.FileMetadata.owner_id == current_user.id
+    ).first()
     if not db_file:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -146,8 +153,11 @@ class RenameRequest(BaseModel):
     new_filename: str
 
 @app.put("/files/{file_id}/rename")
-def rename_file(file_id: int, request: RenameRequest, db: Session = Depends(get_db)):
-    db_file = db.query(models.FileMetadata).filter(models.FileMetadata.id == file_id).first()
+def rename_file(file_id: int, request: RenameRequest, db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    db_file = db.query(models.FileMetadata).filter(
+        models.FileMetadata.id == file_id,
+        models.FileMetadata.owner_id == current_user.id
+    ).first()
     if not db_file:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -183,8 +193,11 @@ class BatchDeleteRequest(BaseModel):
     file_ids: List[int]
 
 @app.post("/files/delete-batch")
-def delete_batch_files(request: BatchDeleteRequest, db: Session = Depends(get_db)):
-    files_to_delete = db.query(models.FileMetadata).filter(models.FileMetadata.id.in_(request.file_ids)).all()
+def delete_batch_files(request: BatchDeleteRequest, db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    files_to_delete = db.query(models.FileMetadata).filter(
+        models.FileMetadata.id.in_(request.file_ids),
+        models.FileMetadata.owner_id == current_user.id
+    ).all()
 
     deleted_ids = []
     for db_file in files_to_delete:
@@ -204,8 +217,11 @@ def delete_batch_files(request: BatchDeleteRequest, db: Session = Depends(get_db
     return {"deleted_ids": deleted_ids}
 
 @app.delete("/files/{file_id}")
-def delete_file(file_id: int, db: Session = Depends(get_db)):
-    db_file = db.query(models.FileMetadata).filter(models.FileMetadata.id == file_id).first()
+def delete_file(file_id: int, db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    db_file = db.query(models.FileMetadata).filter(
+        models.FileMetadata.id == file_id,
+        models.FileMetadata.owner_id == current_user.id
+    ).first()
     if not db_file:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -220,8 +236,10 @@ def delete_file(file_id: int, db: Session = Depends(get_db)):
     return {"detail": "File deleted successfully"}
 
 @app.get("/files")
-def get_files(category: str = None, search: str = None, tag: str = None, sort_by: str = 'date', order: str = 'desc', db: Session = Depends(get_db)):
-    query = db.query(models.FileMetadata)
+def get_files(category: str = None, search: str = None, tag: str = None, sort_by: str = 'date', order: str = 'desc', db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    query = db.query(models.FileMetadata).filter(
+        (models.FileMetadata.owner_id == current_user.id) | (models.FileMetadata.owner_id == None)
+    )
 
     if category:
         query = query.filter(models.FileMetadata.category == category)
@@ -263,7 +281,7 @@ class CloudAccountCreate(BaseModel):
     config: str # JSON
 
 @app.post("/integrations")
-def create_integration(account: CloudAccountCreate, db: Session = Depends(get_db)):
+def create_integration(account: CloudAccountCreate, db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
     # Validate JSON config
     try:
         json.loads(account.config)
@@ -273,7 +291,8 @@ def create_integration(account: CloudAccountCreate, db: Session = Depends(get_db
     db_account = models.CloudAccount(
         provider=account.provider,
         name=account.name,
-        config=account.config
+        config=account.config,
+        owner_id=current_user.id
     )
     db.add(db_account)
     db.commit()
@@ -281,12 +300,15 @@ def create_integration(account: CloudAccountCreate, db: Session = Depends(get_db
     return db_account
 
 @app.get("/integrations")
-def list_integrations(db: Session = Depends(get_db)):
-    return db.query(models.CloudAccount).all()
+def list_integrations(db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    return db.query(models.CloudAccount).filter(models.CloudAccount.owner_id == current_user.id).all()
 
 @app.delete("/integrations/{account_id}")
-def delete_integration(account_id: int, db: Session = Depends(get_db)):
-    account = db.query(models.CloudAccount).filter(models.CloudAccount.id == account_id).first()
+def delete_integration(account_id: int, db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    account = db.query(models.CloudAccount).filter(
+        models.CloudAccount.id == account_id,
+        models.CloudAccount.owner_id == current_user.id
+    ).first()
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 
@@ -298,8 +320,11 @@ def delete_integration(account_id: int, db: Session = Depends(get_db)):
     return {"detail": "Integration deleted"}
 
 @app.post("/integrations/{account_id}/sync")
-def sync_integration(account_id: int, db: Session = Depends(get_db)):
-    account = db.query(models.CloudAccount).filter(models.CloudAccount.id == account_id).first()
+def sync_integration(account_id: int, db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    account = db.query(models.CloudAccount).filter(
+        models.CloudAccount.id == account_id,
+        models.CloudAccount.owner_id == current_user.id
+    ).first()
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 
@@ -328,10 +353,33 @@ def sync_integration(account_id: int, db: Session = Depends(get_db)):
                 content_type=f.get('content_type'),
                 size=f['size'],
                 source=account.provider,
-                cloud_account_id=account.id
+                cloud_account_id=account.id,
+                owner_id=current_user.id
             )
             db.add(new_file)
             count += 1
 
     db.commit()
     return {"synced_files": count}
+
+class ShareRequest(BaseModel):
+    email: EmailStr
+
+@app.post("/files/{file_id}/share")
+async def share_file(file_id: int, share: ShareRequest, db: Session = Depends(database.get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    db_file = db.query(models.FileMetadata).filter(
+        models.FileMetadata.id == file_id,
+        models.FileMetadata.owner_id == current_user.id
+    ).first()
+
+    if not db_file:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Generate a link (Mock: In real app, create a token-based share link)
+    # For now, we send a link to the download endpoint, but it requires auth.
+    # Real implementation would need a public access token system.
+    # We'll simulate it by sending a direct link.
+    link = f"http://localhost:8000/download/{file_id}"
+
+    await email_service.send_share_email(share.email, db_file.filename, link)
+    return {"detail": "Share email sent"}

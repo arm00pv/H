@@ -5,3 +5,10 @@ sqlalchemy
 httpx
 pytest
 requests
+playwright
+passlib[argon2]
+python-jose[cryptography]
+fastapi-mail
+python-dotenv
+pydantic-settings
+jinja2

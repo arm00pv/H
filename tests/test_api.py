@@ -140,3 +140,39 @@ def test_search_and_sort():
     # Test Sort
     res = client.get("/files?sort_by=size&order=asc")
     assert res.status_code == 200
+
+def test_tags_update_and_filter():
+    # Upload
+    filename = "tagged_doc.txt"
+    client.post("/upload/", files={'file': (filename, b"content", 'text/plain')})
+
+    # Get file ID
+    files = client.get("/files").json()
+    file_id = files[0]["id"]
+
+    # Update Tags
+    new_tags = "important, work"
+    res = client.patch(f"/files/{file_id}", json={"tags": new_tags})
+    assert res.status_code == 200
+    assert res.json()["tags"] == new_tags
+
+    # Filter by Tag
+    res = client.get("/files?tag=important")
+    data = res.json()
+    assert len(data) == 1
+    assert data[0]["filename"] == filename
+
+    res = client.get("/files?tag=personal")
+    data = res.json()
+    assert len(data) == 0
+
+def test_content_type_storage():
+    # Upload with specific mime type
+    client.post("/upload/", files={'file': ("image.png", b"fakeimage", 'image/png')})
+
+    files = client.get("/files").json()
+    assert files[0]["content_type"] == "image/png"
+
+    # Download should have correct header
+    res = client.get(f"/download/{files[0]['id']}")
+    assert res.headers["content-type"] == "image/png"

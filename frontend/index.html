@@ -26,11 +26,31 @@
         .action-btn { margin-right: 5px; padding: 4px 8px; border: none; border-radius: 4px; cursor: pointer; color: white; }
         .btn-download { background-color: #3498db; }
         .btn-delete { background-color: #e74c3c; }
+        .btn-preview { background-color: #9b59b6; }
         .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
         .search-input { padding: 6px; border: 1px solid #ccc; border-radius: 4px; flex-grow: 1; }
+
+        /* Modal styles */
+        .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); }
+        .modal-content { background-color: #fefefe; margin: 10% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 800px; border-radius: 8px; }
+        .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }
+        .close:hover, .close:focus { color: black; text-decoration: none; cursor: pointer; }
+        .preview-content { margin-top: 20px; text-align: center; min-height: 200px; display: flex; justify-content: center; align-items: center; }
+        .preview-content img, .preview-content video { max-width: 100%; max-height: 600px; }
+        .preview-content pre { text-align: left; background: #f4f4f9; padding: 10px; width: 100%; overflow-x: auto; }
+
+        .tag { background: #eee; padding: 2px 6px; border-radius: 10px; font-size: 0.8em; margin-right: 4px; display: inline-block; }
+        .tag-add { cursor: pointer; color: #3498db; font-weight: bold; }
     </style>
 </head>
 <body>
+    <div id="preview-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <h2 id="modal-title">File Preview</h2>
+            <div id="preview-container" class="preview-content"></div>
+        </div>
+    </div>
     <header>
         <h1>DataVault Dashboard</h1>
     </header>
@@ -76,6 +96,7 @@
                     <tr>
                         <th>Filename</th>
                         <th>Category</th>
+                        <th>Tags</th>
                         <th>Size (KB)</th>
                         <th>Date</th>
                         <th>Actions</th>
@@ -180,12 +201,18 @@
                 const tr = document.createElement('tr');
                 const date = new Date(file.upload_date).toLocaleDateString();
                 const sizeKB = (file.size / 1024).toFixed(2);
+
+                let tagsHtml = file.tags ? file.tags.split(',').map(t => `<span class="tag">${t.trim()}</span>`).join('') : '';
+                tagsHtml += ` <span class="tag-add" onclick="editTags(${file.id}, '${file.tags || ''}')">+</span>`;
+
                 tr.innerHTML = `
                     <td>${file.filename}</td>
                     <td><span class="category-tag cat-${file.category}">${file.category}</span></td>
+                    <td>${tagsHtml}</td>
                     <td>${sizeKB}</td>
                     <td>${date}</td>
                     <td>
+                        <button class="action-btn btn-preview" onclick="previewFile(${file.id}, '${file.category}', '${file.filename}')">👁</button>
                         <button class="action-btn btn-download" onclick="downloadFile(${file.id})">⬇</button>
                         <button class="action-btn btn-delete" onclick="deleteFile(${file.id})">🗑</button>
                     </td>
@@ -212,6 +239,68 @@
             } catch (err) {
                 console.error(err);
                 alert('Error deleting file');
+            }
+        }
+
+        async function editTags(id, currentTags) {
+            const newTags = prompt("Enter tags (comma separated):", currentTags);
+            if (newTags !== null) {
+                try {
+                    const res = await fetch(`/files/${id}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ tags: newTags })
+                    });
+                    if (res.ok) loadFiles();
+                } catch (err) {
+                    console.error(err);
+                }
+            }
+        }
+
+        function closeModal() {
+            document.getElementById('preview-modal').style.display = "none";
+            document.getElementById('preview-container').innerHTML = "";
+        }
+
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            if (event.target == document.getElementById('preview-modal')) {
+                closeModal();
+            }
+        }
+
+        async function previewFile(id, category, filename) {
+            const modal = document.getElementById('preview-modal');
+            const container = document.getElementById('preview-container');
+            document.getElementById('modal-title').innerText = `Preview: ${filename}`;
+            modal.style.display = "block";
+            container.innerHTML = "Loading...";
+
+            const url = `/download/${id}`;
+
+            if (category === 'Image') {
+                container.innerHTML = `<img src="${url}" alt="Preview">`;
+            } else if (category === 'Video') {
+                container.innerHTML = `<video controls><source src="${url}"></video>`;
+            } else if (category === 'Code' || category === 'Document' || category === 'Table') {
+                try {
+                    const res = await fetch(url);
+                    if (res.ok) {
+                        const text = await res.text();
+                        // Simple truncation for large files
+                        const displayContent = text.length > 10000 ? text.substring(0, 10000) + "\n... (truncated)" : text;
+                        // Escape HTML
+                        const escaped = displayContent.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                        container.innerHTML = `<pre>${escaped}</pre>`;
+                    } else {
+                        container.innerHTML = "Failed to load content.";
+                    }
+                } catch (e) {
+                    container.innerHTML = "Error loading preview.";
+                }
+            } else {
+                container.innerHTML = `<p>Preview not available for this file type. <a href="${url}">Download</a> to view.</p>`;
             }
         }
 

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -7,6 +7,7 @@ import shutil
 import os
 from . import models, database
 from .classifier import Classifier
+from pydantic import BaseModel
 
 # Ensure data directory exists before DB creation (if using file-based SQLite inside it)
 os.makedirs("data", exist_ok=True)
@@ -64,6 +65,7 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         filename=os.path.basename(file_location),
         filepath=file_location,
         category=category,
+        content_type=file.content_type,
         size=file_size
     )
     db.add(db_file)
@@ -98,7 +100,22 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
     if not os.path.exists(db_file.filepath):
         raise HTTPException(status_code=404, detail="File on disk not found")
 
-    return FileResponse(path=db_file.filepath, filename=db_file.filename, media_type='application/octet-stream')
+    media_type = db_file.content_type or 'application/octet-stream'
+    return FileResponse(path=db_file.filepath, filename=db_file.filename, media_type=media_type)
+
+class TagUpdate(BaseModel):
+    tags: str
+
+@app.patch("/files/{file_id}")
+def update_file_tags(file_id: int, tag_update: TagUpdate, db: Session = Depends(get_db)):
+    db_file = db.query(models.FileMetadata).filter(models.FileMetadata.id == file_id).first()
+    if not db_file:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    db_file.tags = tag_update.tags
+    db.commit()
+    db.refresh(db_file)
+    return {"id": db_file.id, "tags": db_file.tags}
 
 @app.delete("/files/{file_id}")
 def delete_file(file_id: int, db: Session = Depends(get_db)):
@@ -117,7 +134,7 @@ def delete_file(file_id: int, db: Session = Depends(get_db)):
     return {"detail": "File deleted successfully"}
 
 @app.get("/files")
-def get_files(category: str = None, search: str = None, sort_by: str = 'date', order: str = 'desc', db: Session = Depends(get_db)):
+def get_files(category: str = None, search: str = None, tag: str = None, sort_by: str = 'date', order: str = 'desc', db: Session = Depends(get_db)):
     query = db.query(models.FileMetadata)
 
     if category:
@@ -125,6 +142,9 @@ def get_files(category: str = None, search: str = None, sort_by: str = 'date', o
 
     if search:
         query = query.filter(models.FileMetadata.filename.contains(search))
+
+    if tag:
+        query = query.filter(models.FileMetadata.tags.contains(tag))
 
     if sort_by == 'size':
         if order == 'asc':
@@ -138,4 +158,12 @@ def get_files(category: str = None, search: str = None, sort_by: str = 'date', o
             query = query.order_by(models.FileMetadata.upload_date.desc())
 
     files = query.all()
-    return [{"id": f.id, "filename": f.filename, "category": f.category, "size": f.size, "upload_date": f.upload_date} for f in files]
+    return [{
+        "id": f.id,
+        "filename": f.filename,
+        "category": f.category,
+        "size": f.size,
+        "upload_date": f.upload_date,
+        "tags": f.tags,
+        "content_type": f.content_type
+    } for f in files]

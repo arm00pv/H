@@ -9,5 +9,7 @@ class FileMetadata(Base):
     filename = Column(String, index=True)
     filepath = Column(String, unique=True)
     category = Column(String, index=True)
+    content_type = Column(String)
+    tags = Column(String, default="")
     size = Column(BigInteger)
     upload_date = Column(DateTime, default=lambda: datetime.now(timezone.utc))

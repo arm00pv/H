@@ -176,3 +176,50 @@ def test_content_type_storage():
     # Download should have correct header
     res = client.get(f"/download/{files[0]['id']}")
     assert res.headers["content-type"] == "image/png"
+
+def test_rename_file():
+    # Upload
+    client.post("/upload/", files={'file': ("old.txt", b"content", 'text/plain')})
+    file_id = client.get("/files").json()[0]["id"]
+
+    # Rename
+    res = client.put(f"/files/{file_id}/rename", json={"new_filename": "new.txt"})
+    assert res.status_code == 200
+    assert res.json()["filename"] == "new.txt"
+
+    # Check DB
+    db_file = client.get("/files").json()[0]
+    assert db_file["filename"] == "new.txt"
+
+    # Check Disk
+    assert not os.path.exists("data/old.txt")
+    assert os.path.exists("data/new.txt")
+
+def test_batch_delete():
+    # Upload 3 files
+    ids = []
+    for i in range(3):
+        client.post("/upload/", files={'file': (f"file{i}.txt", b"content", 'text/plain')})
+        files = client.get("/files").json()
+        # Assuming the last one added is at the end or we find it by name
+        ids.append(files[-1]["id"]) # This is risky if sort order changes, let's be specific
+
+    # Get actual IDs map
+    all_files = client.get("/files").json()
+    target_ids = [f["id"] for f in all_files if f["filename"] in ["file0.txt", "file1.txt"]]
+
+    # Delete 2 of them
+    res = client.post("/files/delete-batch", json={"file_ids": target_ids})
+    assert res.status_code == 200
+    assert len(res.json()["deleted_ids"]) == 2
+
+    # Verify
+    remaining = client.get("/files").json()
+    remaining_names = [f["filename"] for f in remaining]
+    assert "file0.txt" not in remaining_names
+    assert "file1.txt" not in remaining_names
+    assert "file2.txt" in remaining_names
+
+    # Check Disk
+    assert not os.path.exists("data/file0.txt")
+    assert os.path.exists("data/file2.txt")

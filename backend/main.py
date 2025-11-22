@@ -117,6 +117,67 @@ def update_file_tags(file_id: int, tag_update: TagUpdate, db: Session = Depends(
     db.refresh(db_file)
     return {"id": db_file.id, "tags": db_file.tags}
 
+class RenameRequest(BaseModel):
+    new_filename: str
+
+@app.put("/files/{file_id}/rename")
+def rename_file(file_id: int, request: RenameRequest, db: Session = Depends(get_db)):
+    db_file = db.query(models.FileMetadata).filter(models.FileMetadata.id == file_id).first()
+    if not db_file:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Sanitize new filename
+    new_filename = os.path.basename(request.new_filename)
+    if not new_filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    # Determine new path
+    old_path = db_file.filepath
+    dir_name = os.path.dirname(old_path)
+    new_path = os.path.join(dir_name, new_filename)
+
+    # Check if new path exists
+    if os.path.exists(new_path):
+        raise HTTPException(status_code=400, detail="File with this name already exists")
+
+    # Rename on disk
+    try:
+        os.rename(old_path, new_path)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not rename file: {str(e)}")
+
+    # Update DB
+    db_file.filename = new_filename
+    db_file.filepath = new_path
+    db.commit()
+    db.refresh(db_file)
+
+    return {"id": db_file.id, "filename": db_file.filename}
+
+class BatchDeleteRequest(BaseModel):
+    file_ids: List[int]
+
+@app.post("/files/delete-batch")
+def delete_batch_files(request: BatchDeleteRequest, db: Session = Depends(get_db)):
+    files_to_delete = db.query(models.FileMetadata).filter(models.FileMetadata.id.in_(request.file_ids)).all()
+
+    deleted_ids = []
+    for db_file in files_to_delete:
+        # Remove from disk
+        if os.path.exists(db_file.filepath):
+            try:
+                os.remove(db_file.filepath)
+            except OSError:
+                continue # Skip if cannot delete, maybe log it
+
+        # Remove from DB
+        db.delete(db_file)
+        deleted_ids.append(db_file.id)
+
+    db.commit()
+
+    return {"deleted_ids": deleted_ids}
+
 @app.delete("/files/{file_id}")
 def delete_file(file_id: int, db: Session = Depends(get_db)):
     db_file = db.query(models.FileMetadata).filter(models.FileMetadata.id == file_id).first()
